@@ -12,31 +12,48 @@ function signToken(id) {
     });
 }
 
+function sendToken(res, statusCode, user) {
+    const token = signToken(user._id);
+
+    // Creating cookies for JWT token
+    const expireTime =
+        Date.now() + process.env.JWT_COOKIE_EXPIRES_IN * 24 * 60 * 60 * 1000;
+    console.log(expireTime);
+
+    const cookieOptions = {
+        expires: new Date(expireTime),
+        httpOnly: true,
+    };
+    if (process.env.NODE_ENV === "production") {
+        cookieOptions.secure = true;
+    }
+    res.cookie("jwt", token, cookieOptions);
+
+    // Sending the response
+    user.password = undefined;
+    res.status(statusCode).json({
+        status: "success",
+        token,
+        data: {
+            user,
+        },
+    });
+}
+
 exports.signup = catchAsync(async (req, res, next) => {
     /*
         Doing it this way instead of:
             -> const newUser = await User.create(req.body);
         because anyone would be able to register as an admin
     */
-    const { _id, name, email } = await User.create({
+    const newUser = await User.create({
         name: req.body.name,
         email: req.body.email,
         password: req.body.password,
         passwordConfirm: req.body.passwordConfirm,
     });
 
-    const token = signToken(_id);
-
-    res.status(201).json({
-        status: "success",
-        token,
-        data: {
-            newUser: {
-                name,
-                email,
-            },
-        },
-    });
+    sendToken(res, 201, newUser);
 });
 
 exports.login = catchAsync(async (req, res, next) => {
@@ -56,12 +73,7 @@ exports.login = catchAsync(async (req, res, next) => {
     }
 
     // 3. If everything's correct, send the token to client
-    const token = signToken(user._id);
-
-    res.json({
-        status: "success",
-        token,
-    });
+    sendToken(res, 200, user);
 });
 
 exports.protect = catchAsync(async (req, res, next) => {
@@ -188,13 +200,35 @@ exports.resetPassword = catchAsync(async (req, res, next) => {
     user.passwordResetExpires = undefined;
     await user.save();
 
-    // 3. Updating the 'passwordChangedAt' field in a pre middleware on save in 'userModel.js'
+    // 3. 'passwordChangedAt' field is updated in a pre middleware on save in 'userModel.js'
 
     // 4. If everything's correct, send the token to client
-    const token = signToken(user._id);
+    sendToken(res, 200, user);
+});
 
-    res.json({
-        status: "success",
-        token,
-    });
+exports.updatePassword = catchAsync(async (req, res, next) => {
+    const { prevPassword, newPassword, newPasswordConfirm } = req.body;
+
+    // 1. Checking whether the data was provided or not
+    if (!prevPassword || !newPassword) {
+        return next(
+            new AppError("Please enter the current and the new password!", 400),
+        );
+    }
+
+    // 2. Get the user ("req.user" coming from previous middleware)
+    const user = await User.findById(req.user._id).select("+password");
+
+    // 3. Checking whether password entered is correct or not
+    if (!(await user.checkPassword(prevPassword, user.password))) {
+        return next(new AppError("Incorrect password.", 400));
+    }
+
+    // 4. If password entered is correct, then update it
+    user.password = newPassword;
+    user.passwordConfirm = newPasswordConfirm;
+    await user.save();
+
+    // 5. Log in the user, send JWT
+    sendToken(res, 200, user);
 });
